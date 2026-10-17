@@ -1,5 +1,5 @@
 -- =====================================================================
--- SNYX ADVANCED PREDICTION AIMBOT & ESP (ALL-IN-ONE FULLY FIXED)
+-- SNYX ADVANCED PREDICTION AIMBOT & ESP (ALL-IN-ONE FULLY FIXED - BUG 1-9)
 -- =====================================================================
 
 local Players = game:GetService("Players")
@@ -68,7 +68,7 @@ local State = {
     DropIsMultiplier = false,
     AutoBulletSpeed = true,
     BulletSpeed = 5000,
-    BulletGravity = workspace.Gravity, -- [BUG 5 FIX] ใช้ workspace.Gravity เป็นค่าเริ่มต้น ไม่ใช่ 0
+    BulletGravity = workspace.Gravity, -- [BUG 5 FIX] ใช้ workspace.Gravity เป็นค่าเริ่มต้น
     Smoothness = 0.8,
     FOV = 100,
     ShowFOV = false,
@@ -154,7 +154,23 @@ end
 local function setupCharacterWeaponListener(char)
     if not char then return end
     CleanupManager:AddConn("ToolAdded", char.ChildAdded:Connect(function(child)
-        if child:IsA("Tool") then task.defer(function() WeaponService:UpdateAuto() end) end
+        if child:IsA("Tool") then 
+            -- [BUG 7 FIX] เคลียร์แคชและดักฟังเมื่อมีการเพิ่ม Config/Settings ทีหลังในตัว Tool
+            WeaponCache[child] = nil
+            child.ChildAdded:Connect(function(c)
+                local cName = c.Name:lower()
+                if cName:find("acs_settings") or cName:find("settings") or cName:find("config") then
+                    WeaponCache[child] = nil
+                    WeaponService:UpdateAuto()
+                end
+            end)
+
+            -- [BUG 9 FIX] ใส่ Guard เช็คว่า Tool ยังถูกถืออยู่จริงไหมก่อนอัปเดต
+            task.defer(function()
+                local t = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+                if t == child then WeaponService:UpdateAuto() end
+            end) 
+        end
     end))
     CleanupManager:AddConn("ToolRemoved", char.ChildRemoved:Connect(function(child)
         if child:IsA("Tool") then task.defer(function() WeaponService:UpdateAuto() end) end
@@ -170,7 +186,6 @@ CleanupManager:AddConn("CharAdded", LocalPlayer.CharacterAdded:Connect(setupChar
 -- ==========================================
 local VisibilityService = {}
 
--- [BUG 6 FIX] ตรวจสอบความมองเห็นโดยอิงตาม targetPart ที่ต้องการ (เช่น Head) เพื่อความแม่นยำสูง
 function VisibilityService:CheckVisibility(targetCharacter, pierceCount, specificPart)
     if not targetCharacter then return false end
     local camera = getCamera()
@@ -256,15 +271,12 @@ function TargetService:KeepTarget(camera, screenCenter)
     if not self.TargetPart or not self.TargetPart.Parent or not self.TargetPart:IsDescendantOf(self.CurrentTarget.Character) then
         return false
     end
-    -- [BUG 6 FIX] ส่ง TargetPart เข้าไปเช็ค visibility ให้ตรงจุด
     if State.WallCheck and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1, self.TargetPart) then return false end
 
     local screenPoint, onScreen = camera:WorldToViewportPoint(self.TargetPart.Position)
-    -- [BUG 1 FIX] เช็ค Z > 0 ป้องกันเป้าหมายหลังกล้อง
     if not onScreen or screenPoint.Z <= 0 then return false end
 
     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
-    -- [BUG 2 FIX] ใช้ scaled FOV
     if dist > scaleFov(State.FOV) then return false end
 
     return true
@@ -279,10 +291,8 @@ function TargetService:AcquireTarget(camera, screenCenter)
     for _, player in ipairs(Players:GetPlayers()) do
         if isValidEnemy(player) then
             local tempPart = self:GetTargetPart(player.Character)
-            -- [BUG 6 FIX] ส่ง tempPart เข้าไปเช็ค visibility
             if tempPart and (not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1, tempPart)) then
                 local screenPoint, onScreen = camera:WorldToViewportPoint(tempPart.Position)
-                -- [BUG 1 FIX] เช็ค Z > 0 ป้องกันเป้าหลังกล้อง
                 if onScreen and screenPoint.Z > 0 then
                     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
                     if dist < shortestDist then
@@ -296,7 +306,7 @@ function TargetService:AcquireTarget(camera, screenCenter)
     end
 
     if closestPlayer then
-        -- [BUG 4 FIX] ล้าง LockedPartName ทิ้งเมื่อเปลี่ยนเป้าหมายใหม่
+        -- [BUG 4 FIX] เคลียร์ LockedPartName ทิ้งเมื่อเปลี่ยนเป้าหมายใหม่
         if closestPlayer ~= self.CurrentTarget then
             self.LockedPartName = nil
         end
@@ -376,7 +386,6 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
     local currentTime = os.clock()  
     local targetPos = targetPart.Position  
     local targetVel = targetPart.AssemblyLinearVelocity  
-    -- [BUG 3 FIX] ใช้ One-way ping (getPing() * 0.5)
     local pingOffset = State.PingCompensation and (getPing() * 0.5) or 0
     local targetAcc = getTargetAcceleration(targetPart, targetVel, currentTime)  
       
@@ -453,7 +462,7 @@ local function getPredictedPosition(targetPart, rootPart)
 end
 
 -- ==========================================
--- 7. ESP SERVICE
+-- 7. ESP SERVICE (Throttle 30Hz)
 -- ==========================================
 local ESPService = {
     Cache = {},
@@ -546,11 +555,17 @@ function ESPService:ProcessESP()
     end
 end
 
-task.spawn(function()
-    while getgenv().SnyX_Running and task.wait(0.15) do 
-        ESPService:ProcessESP() 
+-- [BUG 8 FIX] เปลี่ยน ESP loop ไปรันบน Heartbeat พร้อม Throttling ที่ 30Hz
+local espAccumulator = 0
+local ESP_INTERVAL = 1 / 30 
+CleanupManager:AddConn("ESP_Heartbeat", RunService.Heartbeat:Connect(function(dt)
+    if not State.ESP and not State.ESPName then return end
+    espAccumulator = espAccumulator + dt
+    if espAccumulator >= ESP_INTERVAL then
+        espAccumulator = 0
+        ESPService:ProcessESP()
     end
-end)
+end))
 
 -- ==========================================
 -- 8. MAIN CAMERA ENGINE
@@ -575,7 +590,6 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
 
     local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
     FOVCircle.Position = screenCenter
-    -- [BUG 2 FIX] วงกลม FOV ปรับสเกลตามหน้าจอ
     FOVCircle.Radius = scaleFov(State.FOV)
     FOVCircle.Visible = State.ShowFOV
 
