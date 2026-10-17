@@ -1,5 +1,5 @@
 -- =====================================================================
--- PART 1: APPROXIMATE PREDICTION AIMBOT & ESP (FIXED BUG 1, 2, 3)
+-- SNYX ADVANCED PREDICTION AIMBOT & ESP (ALL-IN-ONE FIXED VERSION)
 -- =====================================================================
 
 local Players = game:GetService("Players")
@@ -78,14 +78,12 @@ local State = {
 
 local function getCamera() return Workspace.CurrentCamera end
 
--- [FIX 3] GetNetworkPing คืนค่าหน่วยวินาทีอยู่แล้ว (Round-trip)
 local function getPing()
     if not LocalPlayer then return 0 end
     local success, ping = pcall(function() return LocalPlayer:GetNetworkPing() end)
     return (success and type(ping) == "number") and ping or 0.025
 end
 
--- [BUG 2] ฟังก์ชันปรับสเกล FOV ตามความละเอียดหน้าจอ (Reference 1080p)
 local function scaleFov(fovPx)
     local camera = getCamera()
     local vp = camera and camera.ViewportSize or Vector2.new(1920, 1080)
@@ -260,11 +258,9 @@ function TargetService:KeepTarget(camera, screenCenter)
     if State.WallCheck and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1) then return false end
 
     local screenPoint, onScreen = camera:WorldToViewportPoint(self.TargetPart.Position)
-    -- [BUG 1 FIX] เช็ค Z > 0 เพื่อป้องกันเป้าหมายที่อยู่ด้านหลังกล้อง
     if not onScreen or screenPoint.Z <= 0 then return false end
 
     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
-    -- [BUG 2 FIX] ใช้ scaled FOV
     if dist > scaleFov(State.FOV) then return false end
 
     return true
@@ -281,7 +277,6 @@ function TargetService:AcquireTarget(camera, screenCenter)
             local tempPart = self:GetTargetPart(player.Character)
             if tempPart and (not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1)) then
                 local screenPoint, onScreen = camera:WorldToViewportPoint(tempPart.Position)
-                -- [BUG 1 FIX] เช็ค Z > 0 ป้องกันเป้าหลังกล้อง
                 if onScreen and screenPoint.Z > 0 then
                     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
                     if dist < shortestDist then
@@ -301,7 +296,7 @@ function TargetService:AcquireTarget(camera, screenCenter)
 end
 
 -- ==========================================
--- 6. ADVANCED PREDICTION ENGINE (Secant & Low-pass Filter)
+-- 6. ADVANCED PREDICTION ENGINE
 -- ==========================================
 local TargetStates = {}
 local MAX_SAMPLE_DT = 0.1
@@ -358,9 +353,7 @@ end
 
 local function safeUnit(v3)
     local mag = v3.Magnitude
-    if mag <= 1e-6 then
-        return nil
-    end
+    if mag <= 1e-6 then return nil end
     return v3 / mag
 end
 
@@ -373,10 +366,7 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
     local currentTime = os.clock()  
     local targetPos = targetPart.Position  
     local targetVel = targetPart.AssemblyLinearVelocity  
-    
-    -- [BUG 3 FIX] ใช้ One-way ping (getPing() * 0.5) สำหรับชดเชย Ping ในการทำนายตำแหน่ง
     local pingOffset = State.PingCompensation and (getPing() * 0.5) or 0
-    
     local targetAcc = getTargetAcceleration(targetPart, targetVel, currentTime)  
       
     local function f(t)  
@@ -391,35 +381,23 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
     local initialDist = (targetPos - shooterPos).Magnitude  
     local t1 = (initialDist / bulletSpeed) + pingOffset
       
-    if t1 <= 0 then   
-        return safeUnit(targetPos - shooterPos)   
-    end  
+    if t1 <= 0 then return safeUnit(targetPos - shooterPos) end  
 
     local f0 = f(t0)  
     local f1 = f(t1)  
-      
     local t_intercept = t1  
     local tolerance = 0.001  
     local maxIterations = 8  
 
     for i = 1, maxIterations do  
-        if math.abs(f1 - f0) < 1e-6 then   
-            break  
-        end  
-          
+        if math.abs(f1 - f0) < 1e-6 then break end  
         local next_t = t1 - f1 * (t1 - t0) / (f1 - f0)  
-          
         if next_t ~= next_t or next_t == math.huge or next_t == -math.huge then  
             t_intercept = t1  
             break  
         end  
-          
         t_intercept = math.clamp(next_t, 0, MAX_PREDICTION_TIME)  
-
-        if math.abs(t_intercept - t1) < tolerance then  
-            break   
-        end  
-
+        if math.abs(t_intercept - t1) < tolerance then break end  
         t0, f0 = t1, f1  
         t1 = t_intercept  
         f1 = f(t1)  
@@ -440,9 +418,7 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
     if t_intercept > 0 then  
         local requiredVelocity = (displacement / t_intercept) - (0.5 * bulletGravityVec * t_intercept)  
         local finalUnit = safeUnit(requiredVelocity)  
-        if finalUnit then  
-            return finalUnit  
-        end  
+        if finalUnit then return finalUnit end  
     end  
 
     return safeUnit(displacement)
@@ -460,16 +436,13 @@ local function getPredictedPosition(targetPart, rootPart)
     local bulletGravityVec = Vector3.new(0, -WeaponService.Gravity, 0)
     
     local aimDirection = solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletGravityVec)
-    
-    if aimDirection then
-        return shooterPos + (aimDirection * 10000)
-    end
+    if aimDirection then return shooterPos + (aimDirection * 10000) end
     
     return targetPos
 end
 
 -- ==========================================
--- 7. ESP SERVICE (Lifecycle & Cache Managed)
+-- 7. ESP SERVICE
 -- ==========================================
 local ESPService = {
     Cache = {},
@@ -496,7 +469,6 @@ end))
 
 function ESPService:ProcessESP()
     local now = tick()
-    
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local isEnemy = isValidEnemy(player)
@@ -551,6 +523,7 @@ function ESPService:ProcessESP()
                         textLabel.BackgroundTransparency = 1
                         textLabel.Text = player.Name
                         textLabel.TextStrokeTransparency = 0
+                        textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
                         textLabel.Font = Enum.Font.SourceSansBold
                         textLabel.TextSize = 14
                         textLabel.Parent = nameTag
@@ -569,7 +542,7 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- 8. MAIN CAMERA ENGINE (Weapon Gate & Direction Smoothing)
+-- 8. MAIN CAMERA ENGINE
 -- ==========================================
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1.5
@@ -591,7 +564,6 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
 
     local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
     FOVCircle.Position = screenCenter
-    -- [BUG 2 FIX] วงกลม FOV ปรับตามสเกลความละเอียดจอ
     FOVCircle.Radius = scaleFov(State.FOV)
     FOVCircle.Visible = State.ShowFOV
 
@@ -614,7 +586,6 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
         local rootPart = TargetService.CurrentTarget.Character:FindFirstChild("HumanoidRootPart")
         if rootPart then
             local targetPos = getPredictedPosition(TargetService.TargetPart, rootPart)
-            
             local desiredDirection = (targetPos - camera.CFrame.Position).Unit
             local lerpSpeed = math.clamp(State.Smoothness * 35, 1, 60)
             local alpha = 1 - math.exp(-lerpSpeed * deltaTime)
@@ -798,7 +769,6 @@ local function createModeSelector(text, modesArray, initialIndex, callback)
         callback(modesArray[currentIndex])
     end)
 end
-
 local function createSlider(text, min, max, default, step, callback)
     currentLayoutOrder = currentLayoutOrder + 1
     local frame = Instance.new("Frame")
@@ -917,4 +887,3 @@ createSlider("Manual Gravity", 0, 500, State.BulletGravity, 10, function(v)
 end)
 createSlider("Smoothness", 0.05, 1, State.Smoothness, 0.05, function(v) State.Smoothness = v end)
 createSlider("Aimbot FOV Range", 50, 500, State.FOV, 10, function(v) State.FOV = v end)
-
