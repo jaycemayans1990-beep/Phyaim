@@ -1,5 +1,5 @@
 -- =====================================================================
--- SNYX ADVANCED PREDICTION AIMBOT & ESP (ALL-IN-ONE FIXED VERSION)
+-- SNYX ADVANCED PREDICTION AIMBOT & ESP (ALL-IN-ONE FULLY FIXED)
 -- =====================================================================
 
 local Players = game:GetService("Players")
@@ -68,7 +68,7 @@ local State = {
     DropIsMultiplier = false,
     AutoBulletSpeed = true,
     BulletSpeed = 5000,
-    BulletGravity = 0, 
+    BulletGravity = workspace.Gravity, -- [BUG 5 FIX] ใช้ workspace.Gravity เป็นค่าเริ่มต้น ไม่ใช่ 0
     Smoothness = 0.8,
     FOV = 100,
     ShowFOV = false,
@@ -170,12 +170,13 @@ CleanupManager:AddConn("CharAdded", LocalPlayer.CharacterAdded:Connect(setupChar
 -- ==========================================
 local VisibilityService = {}
 
-function VisibilityService:CheckVisibility(targetCharacter, pierceCount)
+-- [BUG 6 FIX] ตรวจสอบความมองเห็นโดยอิงตาม targetPart ที่ต้องการ (เช่น Head) เพื่อความแม่นยำสูง
+function VisibilityService:CheckVisibility(targetCharacter, pierceCount, specificPart)
     if not targetCharacter then return false end
     local camera = getCamera()
     if not camera then return false end
 
-    local targetPart = targetCharacter:FindFirstChild("Head") or targetCharacter:FindFirstChild("HumanoidRootPart")
+    local targetPart = specificPart or targetCharacter:FindFirstChild("Head") or targetCharacter:FindFirstChild("HumanoidRootPart")
     if not targetPart then return false end
 
     local rp = RaycastParams.new()
@@ -255,12 +256,15 @@ function TargetService:KeepTarget(camera, screenCenter)
     if not self.TargetPart or not self.TargetPart.Parent or not self.TargetPart:IsDescendantOf(self.CurrentTarget.Character) then
         return false
     end
-    if State.WallCheck and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1) then return false end
+    -- [BUG 6 FIX] ส่ง TargetPart เข้าไปเช็ค visibility ให้ตรงจุด
+    if State.WallCheck and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1, self.TargetPart) then return false end
 
     local screenPoint, onScreen = camera:WorldToViewportPoint(self.TargetPart.Position)
+    -- [BUG 1 FIX] เช็ค Z > 0 ป้องกันเป้าหมายหลังกล้อง
     if not onScreen or screenPoint.Z <= 0 then return false end
 
     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
+    -- [BUG 2 FIX] ใช้ scaled FOV
     if dist > scaleFov(State.FOV) then return false end
 
     return true
@@ -275,8 +279,10 @@ function TargetService:AcquireTarget(camera, screenCenter)
     for _, player in ipairs(Players:GetPlayers()) do
         if isValidEnemy(player) then
             local tempPart = self:GetTargetPart(player.Character)
-            if tempPart and (not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1)) then
+            -- [BUG 6 FIX] ส่ง tempPart เข้าไปเช็ค visibility
+            if tempPart and (not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1, tempPart)) then
                 local screenPoint, onScreen = camera:WorldToViewportPoint(tempPart.Position)
+                -- [BUG 1 FIX] เช็ค Z > 0 ป้องกันเป้าหลังกล้อง
                 if onScreen and screenPoint.Z > 0 then
                     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
                     if dist < shortestDist then
@@ -290,6 +296,10 @@ function TargetService:AcquireTarget(camera, screenCenter)
     end
 
     if closestPlayer then
+        -- [BUG 4 FIX] ล้าง LockedPartName ทิ้งเมื่อเปลี่ยนเป้าหมายใหม่
+        if closestPlayer ~= self.CurrentTarget then
+            self.LockedPartName = nil
+        end
         self.CurrentTarget = closestPlayer
         self.TargetPart = bestPart
     end
@@ -366,6 +376,7 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
     local currentTime = os.clock()  
     local targetPos = targetPart.Position  
     local targetVel = targetPart.AssemblyLinearVelocity  
+    -- [BUG 3 FIX] ใช้ One-way ping (getPing() * 0.5)
     local pingOffset = State.PingCompensation and (getPing() * 0.5) or 0
     local targetAcc = getTargetAcceleration(targetPart, targetVel, currentTime)  
       
@@ -564,6 +575,7 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
 
     local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
     FOVCircle.Position = screenCenter
+    -- [BUG 2 FIX] วงกลม FOV ปรับสเกลตามหน้าจอ
     FOVCircle.Radius = scaleFov(State.FOV)
     FOVCircle.Visible = State.ShowFOV
 
@@ -769,6 +781,7 @@ local function createModeSelector(text, modesArray, initialIndex, callback)
         callback(modesArray[currentIndex])
     end)
 end
+
 local function createSlider(text, min, max, default, step, callback)
     currentLayoutOrder = currentLayoutOrder + 1
     local frame = Instance.new("Frame")
