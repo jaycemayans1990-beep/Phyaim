@@ -1,5 +1,5 @@
 -- =====================================================================
--- PART 1: APPROXIMATE PREDICTION AIMBOT & ESP (FIXED & PRODUCTION-READY)
+-- PART 1: APPROXIMATE PREDICTION AIMBOT & ESP (FIXED BUG 1, 2, 3)
 -- =====================================================================
 
 local Players = game:GetService("Players")
@@ -78,11 +78,18 @@ local State = {
 
 local function getCamera() return Workspace.CurrentCamera end
 
--- [FIX 1] ping หน่วยถูกต้อง — GetNetworkPing คืนหน่วยเป็นวินาทีอยู่แล้ว ไม่ต้องหาร 2
+-- [FIX 3] GetNetworkPing คืนค่าหน่วยวินาทีอยู่แล้ว (Round-trip)
 local function getPing()
     if not LocalPlayer then return 0 end
     local success, ping = pcall(function() return LocalPlayer:GetNetworkPing() end)
     return (success and type(ping) == "number") and ping or 0.025
+end
+
+-- [BUG 2] ฟังก์ชันปรับสเกล FOV ตามความละเอียดหน้าจอ (Reference 1080p)
+local function scaleFov(fovPx)
+    local camera = getCamera()
+    local vp = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+    return fovPx * (vp.Y / 1080)
 end
 
 -- ==========================================
@@ -100,7 +107,6 @@ function WeaponService:UpdateManual()
     end
 end
 
--- [FIX 3] Cache weapon stats ตาม tool instance เพื่อป้องกัน CPU spike จากการค้นหาซ้ำๆ ทุกเฟรม
 local WeaponCache = setmetatable({}, { __mode = "k" })
 
 function WeaponService:UpdateAuto()
@@ -166,7 +172,6 @@ CleanupManager:AddConn("CharAdded", LocalPlayer.CharacterAdded:Connect(setupChar
 -- ==========================================
 local VisibilityService = {}
 
--- [FIX 2] สร้าง RaycastParams ใหม่ทุกครั้ง (ไม่แชร์ตัวแปร `sharedRaycast`) ป้องกันปัญหาชนกันกับ ESP loop
 function VisibilityService:CheckVisibility(targetCharacter, pierceCount)
     if not targetCharacter then return false end
     local camera = getCamera()
@@ -226,7 +231,6 @@ local TargetService = {
     LockedPartName = nil
 }
 
--- [FIX 5] ล็อค Part ในโหมด Random ไม่ให้ส่ายเปลี่ยนไปมาทุกเฟรม
 function TargetService:GetTargetPart(char)
     local root = char:FindFirstChild("HumanoidRootPart")
     if State.TargetPartMode == "Head" then return char:FindFirstChild("Head") or root end
@@ -248,7 +252,6 @@ function TargetService:ReleaseTarget()
     self.LockedPartName = nil
 end
 
--- [FIX 4] ปรับ FOV เช็คให้สมมาตร (ใช้ State.FOV ตรงๆ ไม่คูณ 1.2 เพื่อป้องกัน target flicker)
 function TargetService:KeepTarget(camera, screenCenter)
     if not isValidEnemy(self.CurrentTarget) then return false end
     if not self.TargetPart or not self.TargetPart.Parent or not self.TargetPart:IsDescendantOf(self.CurrentTarget.Character) then
@@ -257,17 +260,20 @@ function TargetService:KeepTarget(camera, screenCenter)
     if State.WallCheck and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1) then return false end
 
     local screenPoint, onScreen = camera:WorldToViewportPoint(self.TargetPart.Position)
-    if not onScreen then return false end
+    -- [BUG 1 FIX] เช็ค Z > 0 เพื่อป้องกันเป้าหมายที่อยู่ด้านหลังกล้อง
+    if not onScreen or screenPoint.Z <= 0 then return false end
 
     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
-    if dist > State.FOV then return false end
+    -- [BUG 2 FIX] ใช้ scaled FOV
+    if dist > scaleFov(State.FOV) then return false end
 
     return true
 end
 
 function TargetService:AcquireTarget(camera, screenCenter)
     local closestPlayer = nil
-    local shortestDist = State.FOV
+    local currentScaledFOV = scaleFov(State.FOV)
+    local shortestDist = currentScaledFOV
     local bestPart = nil
 
     for _, player in ipairs(Players:GetPlayers()) do
@@ -275,7 +281,8 @@ function TargetService:AcquireTarget(camera, screenCenter)
             local tempPart = self:GetTargetPart(player.Character)
             if tempPart and (not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1)) then
                 local screenPoint, onScreen = camera:WorldToViewportPoint(tempPart.Position)
-                if onScreen then
+                -- [BUG 1 FIX] เช็ค Z > 0 ป้องกันเป้าหลังกล้อง
+                if onScreen and screenPoint.Z > 0 then
                     local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
                     if dist < shortestDist then
                         shortestDist = dist
@@ -366,10 +373,15 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
     local currentTime = os.clock()  
     local targetPos = targetPart.Position  
     local targetVel = targetPart.AssemblyLinearVelocity  
+    
+    -- [BUG 3 FIX] ใช้ One-way ping (getPing() * 0.5) สำหรับชดเชย Ping ในการทำนายตำแหน่ง
+    local pingOffset = State.PingCompensation and (getPing() * 0.5) or 0
+    
     local targetAcc = getTargetAcceleration(targetPart, targetVel, currentTime)  
       
     local function f(t)  
-        local targetAtT = targetPos + (targetVel * t) + (0.5 * targetAcc * (t ^ 2))  
+        local totalT = t + pingOffset
+        local targetAtT = targetPos + (targetVel * totalT) + (0.5 * targetAcc * (totalT ^ 2))  
         local bulletDropAtT = 0.5 * bulletGravityVec * (t ^ 2)  
         local requiredDisplacement = targetAtT - shooterPos - bulletDropAtT  
         return (bulletSpeed * t) - requiredDisplacement.Magnitude  
@@ -377,7 +389,7 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
 
     local t0 = 0  
     local initialDist = (targetPos - shooterPos).Magnitude  
-    local t1 = initialDist / bulletSpeed  
+    local t1 = (initialDist / bulletSpeed) + pingOffset
       
     if t1 <= 0 then   
         return safeUnit(targetPos - shooterPos)   
@@ -421,7 +433,8 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
         state.lastPredictionTime = t_intercept
     end
 
-    local finalTargetPos = targetPos + (targetVel * t_intercept) + (0.5 * targetAcc * (t_intercept ^ 2))  
+    local finalT = t_intercept + pingOffset
+    local finalTargetPos = targetPos + (targetVel * finalT) + (0.5 * targetAcc * (finalT ^ 2))  
     local displacement = finalTargetPos - shooterPos  
       
     if t_intercept > 0 then  
@@ -538,7 +551,6 @@ function ESPService:ProcessESP()
                         textLabel.BackgroundTransparency = 1
                         textLabel.Text = player.Name
                         textLabel.TextStrokeTransparency = 0
-                        textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
                         textLabel.Font = Enum.Font.SourceSansBold
                         textLabel.TextSize = 14
                         textLabel.Parent = nameTag
@@ -579,7 +591,8 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
 
     local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
     FOVCircle.Position = screenCenter
-    FOVCircle.Radius = State.FOV
+    -- [BUG 2 FIX] วงกลม FOV ปรับตามสเกลความละเอียดจอ
+    FOVCircle.Radius = scaleFov(State.FOV)
     FOVCircle.Visible = State.ShowFOV
 
     if not State.Aimbot or not hasActiveWeapon() then
@@ -904,3 +917,4 @@ createSlider("Manual Gravity", 0, 500, State.BulletGravity, 10, function(v)
 end)
 createSlider("Smoothness", 0.05, 1, State.Smoothness, 0.05, function(v) State.Smoothness = v end)
 createSlider("Aimbot FOV Range", 50, 500, State.FOV, 10, function(v) State.FOV = v end)
+
