@@ -1,0 +1,494 @@
+
+-- =====================================================================
+-- AIMBOT + ESP + PREDICTION — MERGED / BUGFIXED BUILD
+-- Base: Physical_Aimbot.txt  |  Fixes: ai-answer-1792248685134.txt
+-- 8 bugs fixed: ping units, raycast sharing, weapon cache, FOV symmetry,
+--               random-part flicker, secant div0, alpha clamp, T clamp
+-- =====================================================================
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local Workspace         = game:GetService("Workspace")
+local UserInputService  = game:GetService("UserInputService")
+local LocalPlayer       = Players.LocalPlayer
+
+-- ==========================================
+-- 1. CLEANUP MANAGER
+-- ==========================================
+local CleanupManager = {
+    Connections = {}, Instances = {}, Drawings = {}, CustomCleanups = {}
+}
+
+function CleanupManager:AddConn(name, conn)
+    if self.Connections[name] then self.Connections[name]:Disconnect() end
+    self.Connections[name] = conn
+end
+function CleanupManager:AddInstance(name, inst)
+    if self.Instances[name] then self.Instances[name]:Destroy() end
+    self.Instances[name] = inst
+end
+function CleanupManager:AddDrawing(name, drawing)
+    if self.Drawings[name] then self.Drawings[name]:Remove() end
+    self.Drawings[name] = drawing
+end
+function CleanupManager:AddCustomCleanup(func)
+    table.insert(self.CustomCleanups, func)
+end
+function CleanupManager:CleanAll()
+    getgenv().SnyX_Running = false
+    for _, c in pairs(self.Connections) do pcall(function() c:Disconnect() end) end
+    for _, i in pairs(self.Instances)   do pcall(function() i:Destroy()    end) end
+    for _, d in pairs(self.Drawings)    do pcall(function() d:Remove()     end) end
+    for _, f in ipairs(self.CustomCleanups) do pcall(f) end
+    table.clear(self.Connections); table.clear(self.Instances)
+    table.clear(self.Drawings);    table.clear(self.CustomCleanups)
+end
+
+if getgenv().SnyX_Cleanup then pcall(function() getgenv().SnyX_Cleanup:CleanAll() end) end
+getgenv().SnyX_Cleanup  = CleanupManager
+getgenv().SnyX_Running  = true
+
+-- ==========================================
+-- 2. STATE
+-- ==========================================
+local State = {
+    Aimbot             = true,
+    TeamCheck          = true,
+    WallCheck          = false,
+    Prediction         = true,
+    TargetPartMode     = "Head",   -- "Head" | "Root" | "Random"
+    PingCompensation   = false,
+    DropIsMultiplier   = false,
+    AutoBulletSpeed    = true,
+    BulletSpeed        = 5000,
+    BulletGravity      = 0,
+    Smoothness         = 0.8,
+    FOV                = 100,
+    ShowFOV            = false,
+    ESP                = true,
+    ESPName            = false,
+}
+getgenv().SnyX_Config = State
+
+local function getCamera() return Workspace.CurrentCamera end
+
+-- [FIX 1] GetNetworkPing คืนวินาทีอยู่แล้ว — ห้ามหาร 2
+local function getPing()
+    if not LocalPlayer then return 0 end
+    local ok, ping = pcall(function() return LocalPlayer:GetNetworkPing() end)
+    if ok and type(ping) == "number" then return ping end
+    return 0.025
+end
+
+-- ==========================================
+-- 3. WEAPON SERVICE  [FIX 3] cache per-tool
+-- ==========================================
+local WeaponService = { Speed = 3000, Gravity = workspace.Gravity }
+local WeaponCache   = setmetatable({}, { __mode = "k" })  -- weak keys
+
+function WeaponService:UpdateManual()
+    if not State.AutoBulletSpeed then
+        self.Speed   = math.max(State.BulletSpeed or 10000, 1)
+        self.Gravity = State.BulletGravity ~= nil and State.BulletGravity or workspace.Gravity
+    end
+end
+
+function WeaponService:UpdateAuto()
+    if not State.AutoBulletSpeed then return self:UpdateManual() end
+
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then
+        self.Speed   = math.max(State.BulletSpeed or 3000, 1)
+        self.Gravity = workspace.Gravity
+        return
+    end
+
+    local cached = WeaponCache[tool]
+    if cached then
+        self.Speed, self.Gravity = cached.Speed, cached.Gravity
+        return
+    end
+
+    local toolName    = tool.Name:lower()
+    local isLauncher  = toolName:find("rpg") or toolName:find("rocket")
+                        or toolName:find("launcher") or toolName:find("grenade")
+    local acsSettings = tool:FindFirstChild("ACS_Settings")
+                        or tool:FindFirstChild("Settings")
+                        or tool:FindFirstChild("Config")
+
+    local speed, gravity = State.BulletSpeed or 3000, workspace.Gravity
+
+    if acsSettings and acsSettings:IsA("ModuleScript") then
+        local ok, config = pcall(require, acsSettings)
+        if ok and type(config) == "table" then
+            local s = config.Velo or config.MuzzleVelocity
+                      or config.BulletSpeed or config.Velocity
+            if type(s) == "number" and s > 0 then speed = s end
+
+            local drop = config.Drop or config.BulletDrop or config.Gravity
+            if type(drop) == "number" then
+                gravity = State.DropIsMultiplier and (workspace.Gravity * drop) or drop
+            else
+                gravity = (isLauncher and not toolName:find("grenade"))
+                          and 0 or workspace.Gravity
+            end
+        end
+    end
+
+    WeaponCache[tool] = { Speed = speed, Gravity = gravity }
+    self.Speed, self.Gravity = speed, gravity
+end
+
+local function setupCharacterWeaponListener(char)
+    if not char then return end
+    CleanupManager:AddConn("ToolAdded", char.ChildAdded:Connect(function(child)
+        if child:IsA("Tool") then task.defer(function() WeaponService:UpdateAuto() end) end
+    end))
+    CleanupManager:AddConn("ToolRemoved", char.ChildRemoved:Connect(function(child)
+        if child:IsA("Tool") then task.defer(function() WeaponService:UpdateAuto() end) end
+    end))
+    WeaponService:UpdateAuto()
+end
+
+if LocalPlayer.Character then setupCharacterWeaponListener(LocalPlayer.Character) end
+CleanupManager:AddConn("CharAdded",
+    LocalPlayer.CharacterAdded:Connect(setupCharacterWeaponListener))
+
+-- ==========================================
+-- 4. VISIBILITY  [FIX 2] per-call RaycastParams (no shared writes)
+-- ==========================================
+local VisibilityService = {}
+
+function VisibilityService:CheckVisibility(targetCharacter, pierceCount)
+    if not targetCharacter then return false end
+    local camera = getCamera(); if not camera then return false end
+
+    local targetPart = targetCharacter:FindFirstChild("Head")
+                    or targetCharacter:FindFirstChild("HumanoidRootPart")
+    if not targetPart then return false end
+
+    local rp = RaycastParams.new()
+    rp.FilterType    = Enum.RaycastFilterType.Exclude
+    rp.IgnoreWater   = true
+
+    local filter = {}
+    if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
+
+    local origin = camera.CFrame.Position
+    local targetPos = targetPart.Position
+    local dir = targetPos - origin
+    local maxPierces = pierceCount or 1
+
+    for _ = 1, maxPierces do
+        rp.FilterDescendantsInstances = filter
+        local result = Workspace:Raycast(origin, dir, rp)
+        if not result then return true end
+        if result.Instance:IsDescendantOf(targetCharacter) then return true end
+
+        if maxPierces > 1
+            and (result.Instance.Transparency > 0.8 or not result.Instance.CanCollide) then
+            table.insert(filter, result.Instance)
+            dir    = targetPos - result.Position
+            origin = result.Position + (dir.Unit * 0.05)
+        else
+            return false
+        end
+    end
+    return false
+end
+
+local function isValidEnemy(player)
+    if not player or player == LocalPlayer or not player.Character then return false end
+    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+    local root     = player.Character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root or humanoid.Health <= 0 then return false end
+    if player.Character:FindFirstChildOfClass("ForceField") then return false end
+    if State.TeamCheck and player.Team and LocalPlayer.Team
+        and player.Team == LocalPlayer.Team then return false end
+    return true
+end
+
+-- ==========================================
+-- 5. TARGET SERVICE  [FIX 4/5] symmetric FOV + locked part
+-- ==========================================
+local TargetService = {
+    CurrentTarget  = nil,
+    TargetPart     = nil,
+    LockedPartName = nil,
+}
+
+function TargetService:GetTargetPart(char)
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if State.TargetPartMode == "Head" then
+        return char:FindFirstChild("Head") or root
+    end
+    if State.TargetPartMode == "Random" then
+        if self.LockedPartName and char:FindFirstChild(self.LockedPartName) then
+            return char:FindFirstChild(self.LockedPartName)
+        end
+        local parts = { "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart" }
+        local name  = parts[math.random(1, #parts)]
+        self.LockedPartName = name
+        return char:FindFirstChild(name) or root
+    end
+    return root
+end
+
+function TargetService:ReleaseTarget()
+    self.CurrentTarget  = nil
+    self.TargetPart     = nil
+    self.LockedPartName = nil
+end
+
+function TargetService:KeepTarget(camera, screenCenter)
+    if not isValidEnemy(self.CurrentTarget) then return false end
+    if not self.TargetPart or not self.TargetPart.Parent
+        or not self.TargetPart:IsDescendantOf(self.CurrentTarget.Character) then
+        return false
+    end
+    if State.WallCheck
+        and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1) then
+        return false
+    end
+    local sp, onScreen = camera:WorldToViewportPoint(self.TargetPart.Position)
+    if not onScreen then return false end
+    local dist = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+    return dist <= State.FOV   -- [FIX 4] เดิม *1.2 ทำให้ flicker
+end
+
+function TargetService:AcquireTarget(camera, screenCenter)
+    local bestPlayer, bestPart, shortestDist = nil, nil, State.FOV
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isValidEnemy(player) then
+            self.LockedPartName = nil   -- [FIX 5] reset lock ต่อ candidate
+            local part = self:GetTargetPart(player.Character)
+            if part and (not State.WallCheck
+                or VisibilityService:CheckVisibility(player.Character, 1)) then
+                local sp, onScreen = camera:WorldToViewportPoint(part.Position)
+                if onScreen then
+                    local d = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+                    if d < shortestDist then
+                        shortestDist = d
+                        bestPlayer   = player
+                        bestPart     = part
+                    end
+                end
+            end
+        end
+    end
+    self.LockedPartName = nil
+    if bestPlayer then
+        self.CurrentTarget = bestPlayer
+        self.TargetPart    = bestPart
+        if State.TargetPartMode == "Random" and bestPart.Name then
+            self.LockedPartName = bestPart.Name
+        end
+    end
+end
+
+-- ==========================================
+-- 6. PREDICTION ENGINE  [FIX 6/7/8]
+--    secant div0 guard / alpha clamp / T clamp
+-- ==========================================
+local TargetStates       = {}
+local MAX_SAMPLE_DT      = 0.1
+local MAX_PREDICTION_TIME= 5.0
+local MIN_DT             = 1e-4
+
+CleanupManager:AddCustomCleanup(function() table.clear(TargetStates) end)
+
+task.spawn(function()
+    while getgenv().SnyX_Running and task.wait(10) do
+        for part in pairs(TargetStates) do
+            if typeof(part) ~= "Instance" or not part:IsDescendantOf(Workspace) then
+                TargetStates[part] = nil
+            end
+        end
+    end
+end)
+
+local function getTargetAcceleration(targetPart, targetVel, currentTime)
+    local state = TargetStates[targetPart]
+    if not state then
+        TargetStates[targetPart] = {
+            lastVelocity        = targetVel,
+            lastTime            = currentTime,
+            smoothedAcceleration= Vector3.zero,
+            lastAcceleration    = Vector3.zero,
+        }
+        return Vector3.zero
+    end
+
+    local dt = currentTime - state.lastTime
+    -- [FIX 6] div0 guard + sample window guard
+    if dt < MIN_DT or dt > MAX_SAMPLE_DT then
+        state.lastVelocity     = targetVel
+        state.lastTime         = currentTime
+        return state.smoothedAcceleration
+    end
+
+    local rawAccel = (targetVel - state.lastVelocity) / dt
+
+    -- [FIX 7] low-pass filter with alpha clamp
+    local alpha = math.clamp(
+        (State.PingCompensation and getPing() or 0) > 0
+            and dt / (dt + getPing()) or 0.35,
+        0.0, 1.0
+    )
+    state.smoothedAcceleration =
+        state.smoothedAcceleration * (1 - alpha) + rawAccel * alpha
+
+    state.lastVelocity  = targetVel
+    state.lastTime      = currentTime
+    state.lastAcceleration = rawAccel
+    return state.smoothedAcceleration
+end
+
+local function predictPosition(targetPart, bulletSpeed, bulletGravity, now)
+    if not State.Prediction or not targetPart then
+        return targetPart and targetPart.Position or nil
+    end
+
+    local state = TargetStates[targetPart]
+    if not state or state.lastVelocity.Magnitude < 1e-3 then
+        return targetPart.Position
+    end
+
+    local ping   = State.PingCompensation and getPing() or 0
+    local speed  = math.max(bulletSpeed or 10, 1)
+    local grav   = bulletGravity or Workspace.Gravity
+
+    local origin = getCamera() and getCamera().CFrame.Position or Vector3.zero
+    local dist   = (targetPart.Position - origin).Magnitude
+    local tFlight= dist / speed
+
+    -- [FIX 8] future time clamp (0 < t <= MAX_PREDICTION_TIME)
+    local tFuture = math.clamp(tFlight + ping, 0, MAX_PREDICTION_TIME)
+
+    local pos = targetPart.Position
+              + state.lastVelocity * tFuture
+              + state.smoothedAcceleration * 0.5 * tFuture * tFuture
+
+    -- bullet drop compensation
+    if grav > 0 and tFuture > 0 then
+        pos = pos + Vector3.new(0, 0.5 * grav * tFuture * tFuture, 0)
+    end
+    return pos
+end
+
+-- ==========================================
+-- 7. AIM EXECUTION LOOP
+-- ==========================================
+local function getScreenCenter()
+    local cam = getCamera()
+    if not cam then return Vector2.zero end
+    local vp = cam.ViewportSize
+    return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+end
+
+local function aimAt(position)
+    local cam = getCamera()
+    if not cam or not position then return end
+    local delta = position - cam.CFrame.Position
+    if delta.Magnitude < 1e-4 then return end
+    local targetCF = CFrame.new(cam.CFrame.Position, cam.CFrame.Position + delta)
+    local smooth   = 1 - math.clamp(State.Smoothness, 0, 1)
+    cam.CFrame     = cam.CFrame:Lerp(targetCF, math.clamp(smooth, 0, 1))
+end
+
+CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function()
+    if not State.Aimbot then
+        TargetService:ReleaseTarget()
+        return
+    end
+    local cam = getCamera(); if not cam then return end
+    local center = getScreenCenter()
+
+    if not TargetService:KeepTarget(cam, center) then
+        TargetService:ReleaseTarget()
+        TargetService:AcquireTarget(cam, center)
+    end
+
+    if TargetService.CurrentTarget and TargetService.TargetPart then
+        WeaponService:UpdateAuto()
+        local now = os.clock()
+        -- sample velocity each frame so accel filter stays fed
+        getTargetAcceleration(
+            TargetService.TargetPart,
+            TargetService.TargetPart.Velocity or Vector3.zero,
+            now
+        )
+        local pos = predictPosition(
+            TargetService.TargetPart,
+            WeaponService.Speed,
+            WeaponService.Gravity,
+            now
+        )
+        aimAt(pos)
+    end
+end))
+
+-- ==========================================
+-- 8. ESP (minimal, drawing-based)
+-- ==========================================
+local ESPDrawings = {}
+
+local function clearESP()
+    for _, d in pairs(ESPDrawings) do pcall(function() d:Remove() end) end
+    table.clear(ESPDrawings)
+end
+CleanupManager:AddCustomCleanup(clearESP)
+
+local function updateESP()
+    if not State.ESP then
+        if next(ESPDrawings) then clearESP() end
+        return
+    end
+    local cam = getCamera(); if not cam then return end
+    local active = {}
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isValidEnemy(player) then
+            local head = player.Character:FindFirstChild("Head")
+            local root = player.Character:FindFirstChild("HumanoidRootPart")
+            if head and root then
+                local headSp,  headOn  = cam:WorldToViewportPoint(head.Position)
+                local rootSp,  rootOn  = cam:WorldToViewportPoint(root.Position)
+                if headOn and rootOn then
+                    local key = player.Name
+                    active[key] = true
+                    local draw = ESPDrawings[key]
+                    if not draw then
+                        draw = Drawing.new("Line")
+                        draw.Thickness = 1
+                        draw.Color     = Color3.fromRGB(255, 60, 60)
+                        draw.Visible   = true
+                        ESPDrawings[key] = draw
+                    end
+                    draw.From = Vector2.new(headSp.X, headSp.Y)
+                    draw.To   = Vector2.new(rootSp.X, rootSp.Y)
+                end
+            end
+        end
+    end
+
+    for key, draw in pairs(ESPDrawings) do
+        if not active[key] then
+            pcall(function() draw:Remove() end)
+            ESPDrawings[key] = nil
+        end
+    end
+end
+CleanupManager:AddConn("ESP", RunService.RenderStepped:Connect(updateESP))
+
+-- ==========================================
+-- 9. TEARDOWN TOKEN
+-- ==========================================
+getgenv().SnyX_Unload = function()
+    pcall(function() CleanupManager:CleanAll() end)
+end
+
+print("[SnyX] merged build loaded — State at getgenv().SnyX_Config")
+
+
